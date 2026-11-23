@@ -3,10 +3,10 @@ from fastapi import FastAPI, Depends
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import SQLAlchemyError
+from app.routes.datasets import router as datasets_router
 
 from app.database import get_db
 from app import models
-
 
 app = FastAPI(
     title="InsightFlow AI API",
@@ -14,6 +14,8 @@ app = FastAPI(
     version="1.0.0",
 )
 
+
+app.include_router(datasets_router)
 
 @app.get("/")
 def home():
