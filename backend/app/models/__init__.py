@@ -1,6 +1,7 @@
 
 from app.models.user import User
 from app.models.dataset import Dataset
+from app.models.dataset_sheet import DatasetSheet
 from app.models.dataset_column import DatasetColumn
 from app.models.record import DatasetRecord
 from app.models.audit_log import AuditLog
@@ -11,4 +12,5 @@ __all__ = [
     "DatasetColumn",
     "DatasetRecord",
     "AuditLog",
+    "DatasetSheet",
 ]
