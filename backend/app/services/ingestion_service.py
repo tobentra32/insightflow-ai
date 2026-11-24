@@ -1,9 +1,12 @@
 
 import math
-import re
+import numbers
+import os
+import time
+
 from datetime import date, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 from uuid import uuid4
 
 import numpy as np
@@ -20,41 +23,54 @@ from app.models import (
 )
 
 
+# --------------------------------------------------
+# CONFIGURATION
+# --------------------------------------------------
+
 BACKEND_DIR = Path(__file__).resolve().parents[2]
+
 UPLOAD_DIR = BACKEND_DIR / "storage" / "uploads"
 
-BATCH_SIZE = 1000
+BATCH_SIZE = int(os.getenv("INGESTION_BATCH_SIZE", "1000"))
+
+if BATCH_SIZE < 1:
+    raise ValueError("INGESTION_BATCH_SIZE must be greater than zero.")
 
 
-def make_unique_headers(values: list[Any]) -> list[str]:
-    """Convert spreadsheet headings into unique column names."""
+# --------------------------------------------------
+# HEADER PROCESSING
+# --------------------------------------------------
 
-    headers = []
-    used = set()
+def make_unique_headers(headers: list[Any]) -> list[str]:
 
-    for index, value in enumerate(values):
-        if pd.isna(value) or not str(value).strip():
-            base = f"unnamed_column_{index + 1}"
+    cleaned_headers = []
+    seen = {}
+
+    for index, header in enumerate(headers):
+
+        if pd.isna(header) or str(header).strip() == "":
+            name = f"column_{index + 1}"
         else:
-            base = str(value).strip()
+            name = str(header).strip()
 
-        name = base
-        suffix = 2
+        if name in seen:
+            seen[name] += 1
+            name = f"{name}_{seen[name]}"
+        else:
+            seen[name] = 1
 
-        while name in used:
-            name = f"{base}_{suffix}"
-            suffix += 1
+        cleaned_headers.append(name)
 
-        used.add(name)
-        headers.append(name)
+    return cleaned_headers
 
-    return headers
 
+# --------------------------------------------------
+# JSON CONVERSION
+# --------------------------------------------------
 
 def to_json_value(value: Any) -> Any:
-    """Convert pandas and NumPy values into JSON-compatible values."""
 
-    if value is None or value is pd.NA or value is pd.NaT:
+    if value is None:
         return None
 
     if isinstance(value, (pd.Timestamp, datetime, date)):
@@ -63,205 +79,379 @@ def to_json_value(value: Any) -> Any:
     if isinstance(value, np.generic):
         value = value.item()
 
-    if isinstance(value, float):
-        if math.isnan(value) or math.isinf(value):
-            return None
-
     if pd.isna(value):
         return None
 
-    return value
+    if isinstance(value, float) and not math.isfinite(value):
+        return None
 
+    if isinstance(value, (str, int, float, bool)):
+        return value
+
+    return str(value)
+
+
+# --------------------------------------------------
+# DATA TYPE INFERENCE
+# --------------------------------------------------
 
 def infer_data_type(series: pd.Series) -> str:
-    """Infer a basic database-independent column data type."""
 
-    dtype = series.dtype
+    values = series.dropna()
 
-    if pd.api.types.is_bool_dtype(dtype):
+    if values.empty:
+        return "empty"
+
+    if pd.api.types.is_bool_dtype(values):
         return "boolean"
 
-    if pd.api.types.is_integer_dtype(dtype):
+    if pd.api.types.is_integer_dtype(values):
         return "integer"
 
-    if pd.api.types.is_float_dtype(dtype):
+    if pd.api.types.is_float_dtype(values):
         return "float"
 
-    if pd.api.types.is_datetime64_any_dtype(dtype):
+    if pd.api.types.is_datetime64_any_dtype(values):
+        return "datetime"
+
+    sample = values.head(100)
+
+    if all(isinstance(value, bool) for value in sample):
+        return "boolean"
+
+    if all(
+        isinstance(value, numbers.Integral)
+        and not isinstance(value, bool)
+        for value in sample
+    ):
+        return "integer"
+
+    if all(
+        isinstance(value, numbers.Real)
+        and not isinstance(value, bool)
+        for value in sample
+    ):
+        return "float"
+
+    if all(
+        isinstance(value, (datetime, date, pd.Timestamp))
+        for value in sample
+    ):
         return "datetime"
 
     return "string"
 
 
+# --------------------------------------------------
+# SHEET EXTRACTION
+# --------------------------------------------------
+
 def extract_sheet_data(
     raw_df: pd.DataFrame,
 ) -> tuple[list[str], pd.DataFrame, list[int]]:
-    """
-    Use the first non-empty row as the header.
 
-    Returns:
-        headers
-        data rows
-        original spreadsheet row numbers
-    """
+    extraction_start = time.perf_counter()
 
-    if raw_df.empty:
-        return [], pd.DataFrame(), []
+    # 1. Inspect original dimensions
+
+    original_shape = raw_df.shape
+
+    original_memory = raw_df.memory_usage(deep=True).sum()
+
+    print(
+        f"\nOriginal worksheet dimensions: "
+        f"{original_shape[0]} rows x {original_shape[1]} columns"
+    )
+
+    print(
+        f"Original DataFrame memory: "
+        f"{original_memory / (1024 * 1024):.2f} MB"
+    )
+
+    # 2. Remove completely empty columns first
+
+    step_start = time.perf_counter()
+
+    raw_df = raw_df.dropna(axis=1, how="all")
+
+    empty_column_removal = time.perf_counter() - step_start
+
+    print(
+        f"After removing empty columns: "
+        f"{raw_df.shape[0]} rows x {raw_df.shape[1]} columns"
+    )
+
+    print(
+        f"Initial empty-column removal: "
+        f"{empty_column_removal:.4f}s"
+    )
+
+    # 3. Replace whitespace-only cells
+
+    step_start = time.perf_counter()
+
+    raw_df = raw_df.replace(
+        r"^\s*$",
+        np.nan,
+        regex=True,
+    )
+
+    whitespace_cleaning = time.perf_counter() - step_start
+
+    # 4. Remove columns containing only empty values
+
+    step_start = time.perf_counter()
+
+    raw_df = raw_df.dropna(axis=1, how="all")
+
+    final_column_removal = time.perf_counter() - step_start
+
+    # 5. Find header row
+
+    step_start = time.perf_counter()
 
     header_index = None
 
     for index, row in raw_df.iterrows():
-        if not row.isna().all():
+
+        if row.notna().sum() >= 2:
             header_index = index
             break
 
+    header_detection = time.perf_counter() - step_start
+
     if header_index is None:
-        return [], pd.DataFrame(), []
+        raise ValueError(
+            "Could not identify a valid header row in this worksheet."
+        )
+
+    # 6. Extract headers
+
+    step_start = time.perf_counter()
 
     headers = make_unique_headers(
-        raw_df.iloc[header_index].tolist()
+        raw_df.loc[header_index].tolist()
     )
 
-    data = raw_df.iloc[header_index + 1:].copy()
+    # 7. Extract records below header
+
+    data = raw_df.loc[header_index + 1:].copy()
+
     data.columns = headers
 
-    # Remove completely empty rows while preserving Excel row numbers.
-    non_empty = ~data.isna().all(axis=1)
+    # Preserve original spreadsheet row numbers.
 
-    original_row_numbers = [
+    row_numbers = [
         int(index) + 1
-        for index in data.index[non_empty]
+        for index in data.index
     ]
 
-    data = data.loc[non_empty].reset_index(drop=True)
+    data_extraction = time.perf_counter() - step_start
 
-    return headers, data, original_row_numbers
+    # 8. Remove completely empty records
+
+    step_start = time.perf_counter()
+
+    non_empty_mask = data.notna().any(axis=1)
+
+    data = data.loc[non_empty_mask].copy()
+
+    row_numbers = [
+        row_number
+        for row_number, keep in zip(
+            row_numbers,
+            non_empty_mask.tolist(),
+        )
+        if keep
+    ]
+
+    empty_record_removal = time.perf_counter() - step_start
+
+    # 9. Performance report
+
+    total_duration = time.perf_counter() - extraction_start
+
+    print("\n---------- EXTRACTION PERFORMANCE ----------")
+
+    print(f"Initial empty-column removal: {empty_column_removal:.4f}s")
+    print(f"Whitespace cleaning: {whitespace_cleaning:.4f}s")
+    print(f"Final empty-column removal: {final_column_removal:.4f}s")
+    print(f"Header detection: {header_detection:.4f}s")
+    print(f"Data extraction: {data_extraction:.4f}s")
+    print(f"Empty record removal: {empty_record_removal:.4f}s")
+    print(f"Total extraction: {total_duration:.4f}s")
+
+    print("---------------------------------------------\n")
+
+    return headers, data, row_numbers
 
 
-def read_uploaded_file(
+# --------------------------------------------------
+# WORKBOOK READING
+# --------------------------------------------------
+
+def iter_uploaded_sheets(
     file_path: Path,
-    extension: str,
-) -> dict[str, pd.DataFrame]:
-    """Read an uploaded file and return its worksheets."""
+) -> Iterator[tuple[str, pd.DataFrame]]:
+
+    extension = file_path.suffix.lower()
+
+    # CSV
 
     if extension == ".csv":
+
         try:
             df = pd.read_csv(
                 file_path,
-                header=None,
                 dtype=object,
-                encoding="utf-8-sig",
                 sep=None,
                 engine="python",
+                encoding="utf-8-sig",
             )
+
         except UnicodeDecodeError:
+
             df = pd.read_csv(
                 file_path,
-                header=None,
                 dtype=object,
-                encoding="cp1252",
                 sep=None,
                 engine="python",
+                encoding="cp1252",
             )
 
-        return {file_path.stem: df}
+        yield file_path.stem, df
 
-    if extension in {".xlsx", ".xlsm"}:
-        excel_file = pd.ExcelFile(
-            file_path,
-            engine="openpyxl",
-        )
+        return
 
-    elif extension == ".xls":
-        excel_file = pd.ExcelFile(
-            file_path,
-            engine="xlrd",
-        )
+    # Excel
 
-    else:
-        raise ValueError("Unsupported file format.")
+    engine = "xlrd" if extension == ".xls" else "openpyxl"
 
-    return {
-        sheet_name: excel_file.parse(
-            sheet_name=sheet_name,
-            header=None,
-            dtype=object,
-        )
-        for sheet_name in excel_file.sheet_names
-    }
+    with pd.ExcelFile(
+        file_path,
+        engine=engine,
+    ) as excel_file:
+
+        for sheet_name in excel_file.sheet_names:
+
+            read_start = time.perf_counter()
+
+            df = excel_file.parse(
+                sheet_name=sheet_name,
+                header=None,
+                dtype=object,
+            )
+
+            read_duration = time.perf_counter() - read_start
+
+            print(
+                f"Worksheet '{sheet_name}' read in "
+                f"{read_duration:.4f}s"
+            )
+
+            yield sheet_name, df
+
+            del df
 
 
-def save_uploaded_file(
-    filename: str,
-    file_bytes: bytes,
-) -> tuple[Path, str]:
-    """Save the original file using a generated unique filename."""
+# --------------------------------------------------
+# FILE STORAGE
+# --------------------------------------------------
 
-    extension = Path(filename).suffix.lower()
+def save_uploaded_file(uploaded_file) -> Path:
 
-    allowed_extensions = {
-        ".xlsx",
-        ".xlsm",
-        ".xls",
-        ".csv",
-    }
+    UPLOAD_DIR.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
 
-    if extension not in allowed_extensions:
-        raise ValueError("Only XLSX, XLSM, XLS and CSV files are supported.")
+    extension = Path(uploaded_file.filename).suffix.lower()
 
-    UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+    file_path = UPLOAD_DIR / f"{uuid4()}{extension}"
 
-    stored_name = f"{uuid4().hex}{extension}"
-    file_path = UPLOAD_DIR / stored_name
+    with file_path.open("wb") as destination:
 
-    file_path.write_bytes(file_bytes)
+        while chunk := uploaded_file.file.read(1024 * 1024):
+            destination.write(chunk)
 
-    return file_path, extension
+    uploaded_file.file.seek(0)
 
+    return file_path
+
+
+# --------------------------------------------------
+# DATASET INGESTION
+# --------------------------------------------------
 
 def ingest_dataset(
     db: Session,
-    filename: str,
-    dataset_name: str,
-    file_bytes: bytes,
-    user_id: int | None = None,
-) -> dict[str, Any]:
-    """Process a file and persist its contents in PostgreSQL."""
+    uploaded_file,
+    dataset_name: str | None = None,
+) -> dict:
 
-    file_path = None
+    ingestion_start = time.perf_counter()
+
+    uploaded_path = None
+
+    total_rows = 0
+    total_columns = 0
+    total_sheets = 0
+
+    total_extraction_duration = 0.0
+    total_insert_duration = 0.0
 
     try:
-        file_path, extension = save_uploaded_file(
-            filename,
-            file_bytes,
-        )
 
-        workbook = read_uploaded_file(
-            file_path,
-            extension,
-        )
+        # 1. Save uploaded file
+
+        uploaded_path = save_uploaded_file(uploaded_file)
+
+        file_size = uploaded_path.stat().st_size
+
+        # 2. Create dataset
 
         dataset = Dataset(
-            user_id=user_id,
-            name=dataset_name,
-            original_filename=Path(filename).name,
-            file_type=extension.lstrip("."),
-            storage_path=str(file_path.relative_to(BACKEND_DIR)),
-            file_size=len(file_bytes),
+            name=dataset_name or uploaded_file.filename,
+            original_filename=uploaded_file.filename,
+            file_type=uploaded_path.suffix.lower().replace(".", ""),
+            storage_path=str(uploaded_path),
+            file_size=file_size,
             status="processing",
         )
 
         db.add(dataset)
+
+        # Make generated dataset ID available.
+
         db.flush()
 
-        total_rows = 0
-        total_columns = 0
-        sheet_results = []
+        # 3. Process worksheets
 
         for sheet_index, (sheet_name, raw_df) in enumerate(
-            workbook.items()
+            iter_uploaded_sheets(uploaded_path)
         ):
+
+            sheet_start = time.perf_counter()
+
+            print(f"\nProcessing worksheet: {sheet_name}")
+
+            total_sheets += 1
+
+            # Extract worksheet data
+
+            extraction_start = time.perf_counter()
+
             headers, data, row_numbers = extract_sheet_data(raw_df)
+
+            extraction_duration = (
+                time.perf_counter() - extraction_start
+            )
+
+            total_extraction_duration += extraction_duration
+
+            del raw_df
+
+            # 4. Create worksheet using actual model fields
 
             sheet = DatasetSheet(
                 dataset_id=dataset.id,
@@ -272,68 +462,116 @@ def ingest_dataset(
             )
 
             db.add(sheet)
+
             db.flush()
 
-            columns = []
+            # 5. Create column metadata using actual model fields
+
+            column_objects = []
 
             for column_index, column_name in enumerate(headers):
+
                 series = data[column_name]
 
                 non_null_values = series.dropna()
 
-                columns.append(
+                column_objects.append(
                     DatasetColumn(
                         sheet_id=sheet.id,
                         column_name=column_name,
                         column_index=column_index,
                         data_type=infer_data_type(series),
-                        is_unique=(
-                            non_null_values.nunique()
-                            == len(non_null_values)
-                        ),
                         null_count=int(series.isna().sum()),
+                        is_unique=(
+                            len(non_null_values) > 0
+                            and non_null_values.is_unique
+                        ),
                     )
                 )
 
-            db.add_all(columns)
+            db.add_all(column_objects)
 
-            records = []
+            # 6. Insert records in batches
 
-            for row_index, (_, row) in enumerate(
-                data.iterrows()
+            insert_start = time.perf_counter()
+
+            batch_records = []
+
+            for row_index, values in zip(
+                row_numbers,
+                data.itertuples(
+                    index=False,
+                    name=None,
+                ),
             ):
+
                 record_data = {
-                    column: to_json_value(row[column])
-                    for column in headers
+                    column: to_json_value(value)
+                    for column, value in zip(headers, values)
                 }
 
-                records.append({
-                    "sheet_id": sheet.id,
-                    "row_index": row_numbers[row_index],
-                    "data": record_data,
-                })
-
-                if len(records) >= BATCH_SIZE:
-                    db.execute(
-                        insert(DatasetRecord),
-                        records,
-                    )
-                    records.clear()
-
-            if records:
-                db.execute(
-                    insert(DatasetRecord),
-                    records,
+                batch_records.append(
+                    {
+                        "sheet_id": sheet.id,
+                        "row_index": row_index,
+                        "data": record_data,
+                    }
                 )
 
-            total_rows += len(data)
-            total_columns += len(headers)
+                if len(batch_records) >= BATCH_SIZE:
 
-            sheet_results.append({
-                "sheet_name": sheet_name,
-                "rows": len(data),
-                "columns": len(headers),
-            })
+                    db.execute(
+                        insert(DatasetRecord),
+                        batch_records,
+                    )
+
+                    batch_records.clear()
+
+            # Insert remaining records
+
+            if batch_records:
+
+                db.execute(
+                    insert(DatasetRecord),
+                    batch_records,
+                )
+
+            insert_duration = time.perf_counter() - insert_start
+
+            total_insert_duration += insert_duration
+
+            # 7. Update totals
+
+            sheet_rows = len(data)
+            sheet_columns = len(headers)
+
+            total_rows += sheet_rows
+            total_columns += sheet_columns
+
+            sheet_duration = time.perf_counter() - sheet_start
+
+            print(f"Worksheet completed: {sheet_name}")
+
+            print(
+                f"Rows: {sheet_rows} | "
+                f"Columns: {sheet_columns}"
+            )
+
+            print(
+                f"Extraction: {extraction_duration:.4f}s | "
+                f"Insertion: {insert_duration:.4f}s"
+            )
+
+            print(
+                f"Worksheet total: {sheet_duration:.4f}s"
+            )
+
+            del data
+            del row_numbers
+            del headers
+            del column_objects
+
+        # 8. Update dataset summary
 
         dataset.row_count = total_rows
         dataset.column_count = total_columns
@@ -341,21 +579,48 @@ def ingest_dataset(
 
         db.commit()
 
+        # 9. Performance summary
+
+        total_duration = time.perf_counter() - ingestion_start
+
+        print("\n========== INGESTION SUMMARY ==========")
+
+        print(f"Worksheets: {total_sheets}")
+        print(f"Total rows: {total_rows}")
+        print(f"Total columns: {total_columns}")
+
+        print(
+            f"Total extraction: "
+            f"{total_extraction_duration:.4f}s"
+        )
+
+        print(
+            f"Total insertion: "
+            f"{total_insert_duration:.4f}s"
+        )
+
+        print(
+            f"Total ingestion: "
+            f"{total_duration:.4f}s"
+        )
+
+        print("=======================================\n")
+
         return {
             "dataset_id": dataset.id,
-            "dataset_name": dataset.name,
-            "filename": filename,
-            "total_rows": total_rows,
-            "total_columns": total_columns,
-            "total_sheets": len(sheet_results),
-            "sheets": sheet_results,
+            "name": dataset.name,
+            "filename": dataset.original_filename,
             "status": dataset.status,
+            "sheet_count": total_sheets,
+            "row_count": total_rows,
+            "column_count": total_columns,
         }
 
     except Exception:
+
         db.rollback()
 
-        if file_path and file_path.exists():
-            file_path.unlink()
+        if uploaded_path and uploaded_path.exists():
+            uploaded_path.unlink()
 
         raise

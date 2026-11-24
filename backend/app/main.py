@@ -4,6 +4,7 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import SQLAlchemyError
 from app.routes.datasets import router as datasets_router
+from app.routes.sheets import router as sheets_router
 
 from app.database import get_db
 from app import models
@@ -16,6 +17,7 @@ app = FastAPI(
 
 
 app.include_router(datasets_router)
+app.include_router(sheets_router)
 
 @app.get("/")
 def home():

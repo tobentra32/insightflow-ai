@@ -24,76 +24,86 @@ class Dataset(Base):
     user_id: Mapped[int | None] = mapped_column(
         ForeignKey("users.id", ondelete="SET NULL"),
         nullable=True,
-        index=True
+        index=True,
+    )
+
+    department_id: Mapped[int | None] = mapped_column(
+        ForeignKey("departments.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
     )
 
     name: Mapped[str] = mapped_column(
         String(255),
-        nullable=False
+        nullable=False,
     )
 
     original_filename: Mapped[str] = mapped_column(
         String(255),
-        nullable=False
+        nullable=False,
     )
 
     file_type: Mapped[str] = mapped_column(
         String(20),
-        nullable=False
+        nullable=False,
     )
 
     storage_path: Mapped[str | None] = mapped_column(
         String(1000),
-        nullable=True
+        nullable=True,
     )
 
     file_size: Mapped[int] = mapped_column(
         BigInteger,
-        nullable=False
+        nullable=False,
     )
 
     row_count: Mapped[int] = mapped_column(
         Integer,
         server_default=text("0"),
-        nullable=False
+        nullable=False,
     )
 
     column_count: Mapped[int] = mapped_column(
         Integer,
         server_default=text("0"),
-        nullable=False
+        nullable=False,
     )
 
     status: Mapped[str] = mapped_column(
         String(30),
         server_default=text("'uploaded'"),
-        nullable=False
+        nullable=False,
     )
 
     profile: Mapped[dict | None] = mapped_column(
         JSONB,
-        nullable=True
+        nullable=True,
     )
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),
-        nullable=False
+        nullable=False,
     )
 
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),
         onupdate=func.now(),
-        nullable=False
+        nullable=False,
     )
 
     owner: Mapped["User | None"] = relationship(
-        back_populates="datasets"
+        back_populates="datasets",
+    )
+
+    department: Mapped["Department | None"] = relationship(
+        back_populates="datasets",
     )
 
     sheets: Mapped[list["DatasetSheet"]] = relationship(
         back_populates="dataset",
         cascade="all, delete-orphan",
-        passive_deletes=True
+        passive_deletes=True,
     )

@@ -1,7 +1,15 @@
 
 from datetime import datetime, timezone
 
-from sqlalchemy import DateTime, Integer, String
+from sqlalchemy import (
+    Boolean,
+    CheckConstraint,
+    DateTime,
+    ForeignKey,
+    Integer,
+    String,
+    text,
+)
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import Base
@@ -10,18 +18,61 @@ from app.database import Base
 class User(Base):
     __tablename__ = "users"
 
-    id: Mapped[int] = mapped_column(
-        Integer, primary_key=True, index=True
+    __table_args__ = (
+        CheckConstraint(
+            "role IN ('admin', 'employee')",
+            name="ck_users_valid_role",
+        ),
     )
 
-    name: Mapped[str] = mapped_column(String(150), nullable=False)
+    id: Mapped[int] = mapped_column(
+        Integer,
+        primary_key=True,
+        index=True,
+    )
+
+    name: Mapped[str] = mapped_column(
+        String(150),
+        nullable=False,
+    )
 
     email: Mapped[str] = mapped_column(
-        String(255), unique=True, index=True, nullable=False
+        String(255),
+        unique=True,
+        index=True,
+        nullable=False,
     )
 
     password_hash: Mapped[str] = mapped_column(
-        String(255), nullable=False
+        String(255),
+        nullable=False,
+    )
+
+    role: Mapped[str] = mapped_column(
+        String(30),
+        default="employee",
+        server_default=text("'employee'"),
+        nullable=False,
+    )
+
+    department_id: Mapped[int | None] = mapped_column(
+        ForeignKey("departments.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+
+    is_active: Mapped[bool] = mapped_column(
+        Boolean,
+        default=True,
+        server_default=text("true"),
+        nullable=False,
+    )
+
+    must_change_password: Mapped[bool] = mapped_column(
+        Boolean,
+        default=True,
+        server_default=text("true"),
+        nullable=False,
     )
 
     created_at: Mapped[datetime] = mapped_column(
@@ -30,7 +81,10 @@ class User(Base):
         nullable=False,
     )
 
-    datasets = relationship(
-        "Dataset", back_populates="owner",
-        cascade="all, delete-orphan"
+    department: Mapped["Department | None"] = relationship(
+        back_populates="users",
+    )
+
+    datasets: Mapped[list["Dataset"]] = relationship(
+        back_populates="owner",
     )

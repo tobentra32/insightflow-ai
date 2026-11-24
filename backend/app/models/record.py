@@ -20,58 +20,50 @@ class DatasetRecord(Base):
 
     __table_args__ = (
         UniqueConstraint(
-            "dataset_id",
+            "sheet_id",
             "row_index",
-            name="uq_dataset_record_row"
+            name="uq_sheet_record_row",
         ),
     )
 
     id: Mapped[int] = mapped_column(
         primary_key=True,
-        index=True
+        index=True,
     )
 
-    dataset_id: Mapped[int] = mapped_column(
-        ForeignKey("datasets.id", ondelete="CASCADE"),
+    sheet_id: Mapped[int] = mapped_column(
+        ForeignKey("dataset_sheets.id", ondelete="CASCADE"),
         nullable=False,
-        index=True
+        index=True,
     )
 
     row_index: Mapped[int] = mapped_column(
         Integer,
-        nullable=False
+        nullable=False,
     )
 
     data: Mapped[dict[str, Any]] = mapped_column(
         JSONB,
-        nullable=False
+        nullable=False,
     )
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),
-        nullable=False
+        nullable=False,
     )
 
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),
         onupdate=func.now(),
-        nullable=False
+        nullable=False,
     )
-
-  
 
     audit_logs: Mapped[list["AuditLog"]] = relationship(
-        back_populates="record"
-    )
-
-    sheet_id: Mapped[int] = mapped_column(
-        ForeignKey("dataset_sheets.id", ondelete="CASCADE"),
-        nullable=False,
-        index=True
+        back_populates="record",
     )
 
     sheet: Mapped["DatasetSheet"] = relationship(
-        back_populates="records"
+        back_populates="records",
     )
