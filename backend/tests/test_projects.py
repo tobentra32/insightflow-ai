@@ -2,8 +2,10 @@
 import uuid
 
 import pytest
+from sqlalchemy import select
 
 from app.core.dependencies import get_current_user
+from app.models.audit_log import AuditLog
 from app.models.department import Department
 from app.models.project import Project
 from app.models.user import User
@@ -67,6 +69,18 @@ def create_project(
     db_session.flush()
 
     return project
+
+
+def get_project_audit_logs(db_session, project_id):
+    """Return audit logs belonging to a specific project."""
+    return db_session.scalars(
+        select(AuditLog)
+        .where(
+            AuditLog.entity_type == "project",
+            AuditLog.entity_id == project_id,
+        )
+        .order_by(AuditLog.id)
+    ).all()
 
 
 # --------------------------------------------------
@@ -586,3 +600,199 @@ def test_project_rejects_invalid_status(
     )
 
     assert response.status_code == 422
+
+
+# --------------------------------------------------
+# AUDIT LOGGING
+# --------------------------------------------------
+
+def test_project_creation_generates_audit_logs(
+    client,
+    db_session,
+):
+    department = create_department(db_session)
+
+    employee = create_user(
+        db_session,
+        department_id=department.id,
+    )
+
+    authenticate(client, employee)
+
+    response = client.post(
+        "/api/projects",
+        json={
+            "customer_name": "Audit Test Customer",
+            "destination": "China",
+            "contract_reference": "AUDIT-001",
+            "description": "Audit creation test",
+        },
+    )
+
+    assert response.status_code == 201
+
+    project_id = response.json()["id"]
+
+    logs = get_project_audit_logs(db_session, project_id)
+
+    assert len(logs) == 6
+
+    logged_fields = {
+        log.field_name: log
+        for log in logs
+    }
+
+    expected_fields = {
+        "department_id",
+        "customer_name",
+        "destination",
+        "contract_reference",
+        "description",
+        "status",
+    }
+
+    assert set(logged_fields) == expected_fields
+
+    for log in logs:
+        assert log.action == "created"
+        assert log.entity_type == "project"
+        assert log.entity_id == project_id
+        assert log.user_id == employee.id
+        assert log.old_value is None
+
+    assert logged_fields["customer_name"].new_value == "Audit Test Customer"
+    assert logged_fields["destination"].new_value == "China"
+    assert logged_fields["department_id"].new_value == department.id
+
+
+def test_project_update_logs_only_changed_fields(
+    client,
+    db_session,
+):
+    department = create_department(db_session)
+
+    employee = create_user(
+        db_session,
+        department_id=department.id,
+    )
+
+    project = create_project(
+        db_session,
+        department.id,
+        employee.id,
+    )
+
+    authenticate(client, employee)
+
+    response = client.patch(
+        f"/api/projects/{project.id}",
+        json={
+            "destination": "Japan",
+        },
+    )
+
+    assert response.status_code == 200
+
+    logs = get_project_audit_logs(db_session, project.id)
+
+    assert len(logs) == 1
+
+    log = logs[0]
+
+    assert log.action == "updated"
+    assert log.entity_type == "project"
+    assert log.entity_id == project.id
+    assert log.user_id == employee.id
+    assert log.field_name == "destination"
+    assert log.old_value == "China"
+    assert log.new_value == "Japan"
+
+
+def test_project_department_reassignment_is_audited(
+    client,
+    db_session,
+):
+    department_a = create_department(db_session)
+    department_b = create_department(db_session)
+
+    creator = create_user(
+        db_session,
+        department_id=department_a.id,
+    )
+
+    admin = create_user(
+        db_session,
+        role="admin",
+    )
+
+    project = create_project(
+        db_session,
+        department_a.id,
+        creator.id,
+    )
+
+    authenticate(client, admin)
+
+    response = client.patch(
+        f"/api/projects/{project.id}",
+        json={
+            "department_id": department_b.id,
+        },
+    )
+
+    assert response.status_code == 200
+
+    logs = get_project_audit_logs(db_session, project.id)
+
+    assert len(logs) == 1
+
+    log = logs[0]
+
+    assert log.action == "department_reassigned"
+    assert log.entity_type == "project"
+    assert log.entity_id == project.id
+    assert log.user_id == admin.id
+    assert log.field_name == "department_id"
+    assert log.old_value == department_a.id
+    assert log.new_value == department_b.id
+
+
+def test_unauthorised_project_update_creates_no_audit_logs(
+    client,
+    db_session,
+):
+    department = create_department(db_session)
+
+    creator = create_user(
+        db_session,
+        department_id=department.id,
+    )
+
+    colleague = create_user(
+        db_session,
+        department_id=department.id,
+    )
+
+    project = create_project(
+        db_session,
+        department.id,
+        creator.id,
+    )
+
+    authenticate(client, colleague)
+
+    response = client.patch(
+        f"/api/projects/{project.id}",
+        json={
+            "destination": "Japan",
+        },
+    )
+
+    assert response.status_code == 403
+
+    logs = get_project_audit_logs(db_session, project.id)
+
+    assert logs == []
+
+    db_session.refresh(project)
+    assert project.destination == "China"

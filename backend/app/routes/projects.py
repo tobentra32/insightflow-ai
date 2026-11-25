@@ -1,6 +1,5 @@
-
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from app.core.dependencies import get_current_user
@@ -14,6 +13,7 @@ from app.schemas.project import (
     ProjectResponse,
     ProjectUpdateRequest,
 )
+from app.services.audit import record_audit_changes
 
 
 router = APIRouter(
@@ -72,7 +72,10 @@ def require_project_editor(
     if project.created_by != current_user.id:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Only the project creator or an administrator can modify this project.",
+            detail=(
+                "Only the project creator or an administrator "
+                "can modify this project."
+            ),
         )
 
 
@@ -90,7 +93,10 @@ def create_project(
         if current_user.department_id is None:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
-                detail="Your account must be assigned to a department before creating projects.",
+                detail=(
+                    "Your account must be assigned to a department "
+                    "before creating projects."
+                ),
             )
 
         if (
@@ -108,7 +114,10 @@ def create_project(
         if payload.department_id is None:
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail="Administrators must select a department for the project.",
+                detail=(
+                    "Administrators must select a department "
+                    "for the project."
+                ),
             )
 
         department_id = payload.department_id
@@ -137,6 +146,31 @@ def create_project(
     )
 
     db.add(project)
+
+    # Obtain the generated project ID without committing yet.
+    db.flush()
+
+    initial_values = {
+        "department_id": project.department_id,
+        "customer_name": project.customer_name,
+        "destination": project.destination,
+        "contract_reference": project.contract_reference,
+        "description": project.description,
+        "status": project.status,
+    }
+
+    record_audit_changes(
+        db,
+        user_id=current_user.id,
+        entity_type="project",
+        entity_id=project.id,
+        action="created",
+        changes={
+            field_name: (None, value)
+            for field_name, value in initial_values.items()
+        },
+    )
+
     db.commit()
     db.refresh(project)
 
@@ -184,17 +218,24 @@ def list_projects(
     conditions = []
 
     if effective_department_id is not None:
-        conditions.append(Project.department_id == effective_department_id)
+        conditions.append(
+            Project.department_id == effective_department_id
+        )
 
     if project_status:
         conditions.append(Project.status == project_status)
 
-    if search:
-        search_term = f"%{search.strip()}%"
+    search_term = search.strip() if search else ""
+
+    if search_term:
+        pattern = f"%{search_term}%"
+
         conditions.append(
-            Project.customer_name.ilike(search_term)
-            | Project.destination.ilike(search_term)
-            | Project.contract_reference.ilike(search_term)
+            or_(
+                Project.customer_name.ilike(pattern),
+                Project.destination.ilike(pattern),
+                Project.contract_reference.ilike(pattern),
+            )
         )
 
     total = db.scalar(
@@ -240,10 +281,16 @@ def update_project(
         if current_user.role != "admin":
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
-                detail="Only administrators can reassign projects to another department.",
+                detail=(
+                    "Only administrators can reassign projects "
+                    "to another department."
+                ),
             )
 
-        department = db.get(Department, updates["department_id"])
+        department = db.get(
+            Department,
+            updates["department_id"],
+        )
 
         if department is None:
             raise HTTPException(
@@ -251,10 +298,32 @@ def update_project(
                 detail="Department not found.",
             )
 
-    for field, value in updates.items():
-        setattr(project, field, value)
+    changes = {}
 
-    db.commit()
-    db.refresh(project)
+    for field, new_value in updates.items():
+        old_value = getattr(project, field)
+
+        if old_value != new_value:
+            changes[field] = (old_value, new_value)
+            setattr(project, field, new_value)
+
+    if changes:
+        action = (
+            "department_reassigned"
+            if "department_id" in changes
+            else "updated"
+        )
+
+        record_audit_changes(
+            db,
+            user_id=current_user.id,
+            entity_type="project",
+            entity_id=project.id,
+            action=action,
+            changes=changes,
+        )
+
+        db.commit()
+        db.refresh(project)
 
     return project
