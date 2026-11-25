@@ -1,12 +1,13 @@
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 
+from app.core.dependencies import get_current_user
+from app.core.permissions import get_accessible_sheet
 from app.database import get_db
-from app.models.dataset_sheet import DatasetSheet
 from app.models.dataset_column import DatasetColumn
 from app.models.record import DatasetRecord
-
+from app.models.user import User
 from app.schemas.dataset import (
     DatasetColumnResponse,
     DatasetRecordListResponse,
@@ -19,10 +20,6 @@ router = APIRouter(
 )
 
 
-# --------------------------------------------------
-# GET SHEET COLUMNS
-# --------------------------------------------------
-
 @router.get(
     "/{sheet_id}/columns",
     response_model=list[DatasetColumnResponse],
@@ -30,34 +27,23 @@ router = APIRouter(
 def get_sheet_columns(
     sheet_id: int,
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
-    """Retrieve all columns belonging to a worksheet."""
+    """Retrieve columns only if the parent dataset is accessible."""
 
-    sheet = db.get(DatasetSheet, sheet_id)
+    get_accessible_sheet(
+        db=db,
+        sheet_id=sheet_id,
+        current_user=current_user,
+    )
 
-    if sheet is None:
-        raise HTTPException(
-            status_code=404,
-            detail="Worksheet not found.",
-        )
-
-    columns = (
+    return (
         db.query(DatasetColumn)
-        .filter(
-            DatasetColumn.sheet_id == sheet_id
-        )
-        .order_by(
-            DatasetColumn.column_index.asc()
-        )
+        .filter(DatasetColumn.sheet_id == sheet_id)
+        .order_by(DatasetColumn.column_index.asc())
         .all()
     )
 
-    return columns
-
-
-# --------------------------------------------------
-# GET SHEET RECORDS
-# --------------------------------------------------
 
 @router.get(
     "/{sheet_id}/records",
@@ -68,45 +54,31 @@ def get_sheet_records(
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=50, ge=1, le=500),
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
-    """Retrieve worksheet records with pagination."""
+    """Retrieve records only if the parent dataset is accessible."""
 
-    # First, check whether the worksheet exists.
-    sheet = db.get(DatasetSheet, sheet_id)
-
-    if sheet is None:
-        raise HTTPException(
-            status_code=404,
-            detail="Worksheet not found.",
-        )
-
-    # Count all records belonging to this worksheet.
-    total_records = (
-        db.query(DatasetRecord)
-        .filter(
-            DatasetRecord.sheet_id == sheet_id
-        )
-        .count()
+    get_accessible_sheet(
+        db=db,
+        sheet_id=sheet_id,
+        current_user=current_user,
     )
 
-    # Calculate how many records to skip.
+    query = db.query(DatasetRecord).filter(
+        DatasetRecord.sheet_id == sheet_id
+    )
+
+    total_records = query.count()
     offset = (page - 1) * page_size
 
-    # Retrieve the requested page of records.
     records = (
-        db.query(DatasetRecord)
-        .filter(
-            DatasetRecord.sheet_id == sheet_id
-        )
-        .order_by(
-            DatasetRecord.row_index.asc()
-        )
+        query
+        .order_by(DatasetRecord.row_index.asc())
         .offset(offset)
         .limit(page_size)
         .all()
     )
 
-    # Calculate the total number of pages.
     total_pages = (
         (total_records + page_size - 1) // page_size
     )

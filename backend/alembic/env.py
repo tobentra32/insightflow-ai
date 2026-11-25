@@ -1,31 +1,47 @@
 
 import os
-
+from pathlib import Path
 from logging.config import fileConfig
 
-from alembic import context
 from dotenv import load_dotenv
-from sqlalchemy import engine_from_config, pool
+from alembic import context
+from sqlalchemy import pool
 
-from app.database import Base
+backend_dir = Path(__file__).resolve().parents[1]
+load_dotenv(dotenv_path=backend_dir / ".env")
+
+from app.database import (
+    Base,
+    create_database_engine,
+    normalize_database_url,
+)
 from app import models
 
-
-load_dotenv()
 
 config = context.config
 
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
-database_url = os.getenv("DATABASE_URL")
+
+database_url = (
+    os.getenv("ALEMBIC_DATABASE_URL")
+    or os.getenv("DATABASE_URL")
+)
 
 if not database_url:
-    raise RuntimeError("DATABASE_URL is missing")
+    raise RuntimeError(
+        "Neither ALEMBIC_DATABASE_URL nor DATABASE_URL is configured."
+    )
+
+
+normalized_url = normalize_database_url(database_url)
 
 config.set_main_option(
     "sqlalchemy.url",
-    database_url.replace("%", "%%"),
+    normalized_url.render_as_string(
+        hide_password=False
+    ).replace("%", "%%"),
 )
 
 target_metadata = Base.metadata
@@ -47,9 +63,8 @@ def run_migrations_offline():
 
 
 def run_migrations_online():
-    connectable = engine_from_config(
-        config.get_section(config.config_ini_section),
-        prefix="sqlalchemy.",
+    connectable = create_database_engine(
+        database_url,
         poolclass=pool.NullPool,
     )
 
@@ -62,6 +77,8 @@ def run_migrations_online():
 
         with context.begin_transaction():
             context.run_migrations()
+
+    connectable.dispose()
 
 
 if context.is_offline_mode():

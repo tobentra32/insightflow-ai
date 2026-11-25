@@ -1,19 +1,18 @@
 
 import os
 
+from dotenv import load_dotenv
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 
-from dotenv import load_dotenv
+load_dotenv()
 
 from app.database import engine
-from app.routes import datasets, sheets, auth
+from app.routes import admin, auth, datasets, projects, sheets
 
-
-load_dotenv()
 
 app = FastAPI(
     title="InsightFlow AI API",
@@ -43,7 +42,6 @@ app.add_middleware(
 
 @app.middleware("http")
 async def validate_browser_origin(request: Request, call_next):
-
     if request.method in {"POST", "PUT", "PATCH", "DELETE"}:
         origin = request.headers.get("origin")
 
@@ -57,8 +55,10 @@ async def validate_browser_origin(request: Request, call_next):
 
 
 app.include_router(auth.router)
+app.include_router(admin.router)
 app.include_router(datasets.router)
 app.include_router(sheets.router)
+app.include_router(projects.router)
 
 
 @app.get("/")
@@ -71,7 +71,6 @@ def root():
 
 @app.get("/health/database")
 def database_health():
-
     try:
         with engine.connect() as connection:
             connection.execute(text("SELECT 1"))

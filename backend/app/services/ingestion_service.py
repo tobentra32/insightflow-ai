@@ -23,12 +23,7 @@ from app.models import (
 )
 
 
-# --------------------------------------------------
-# CONFIGURATION
-# --------------------------------------------------
-
 BACKEND_DIR = Path(__file__).resolve().parents[2]
-
 UPLOAD_DIR = BACKEND_DIR / "storage" / "uploads"
 
 BATCH_SIZE = int(os.getenv("INGESTION_BATCH_SIZE", "1000"))
@@ -37,17 +32,11 @@ if BATCH_SIZE < 1:
     raise ValueError("INGESTION_BATCH_SIZE must be greater than zero.")
 
 
-# --------------------------------------------------
-# HEADER PROCESSING
-# --------------------------------------------------
-
 def make_unique_headers(headers: list[Any]) -> list[str]:
-
     cleaned_headers = []
     seen = {}
 
     for index, header in enumerate(headers):
-
         if pd.isna(header) or str(header).strip() == "":
             name = f"column_{index + 1}"
         else:
@@ -64,12 +53,7 @@ def make_unique_headers(headers: list[Any]) -> list[str]:
     return cleaned_headers
 
 
-# --------------------------------------------------
-# JSON CONVERSION
-# --------------------------------------------------
-
 def to_json_value(value: Any) -> Any:
-
     if value is None:
         return None
 
@@ -91,12 +75,7 @@ def to_json_value(value: Any) -> Any:
     return str(value)
 
 
-# --------------------------------------------------
-# DATA TYPE INFERENCE
-# --------------------------------------------------
-
 def infer_data_type(series: pd.Series) -> str:
-
     values = series.dropna()
 
     if values.empty:
@@ -142,78 +121,48 @@ def infer_data_type(series: pd.Series) -> str:
     return "string"
 
 
-# --------------------------------------------------
-# SHEET EXTRACTION
-# --------------------------------------------------
-
 def extract_sheet_data(
     raw_df: pd.DataFrame,
 ) -> tuple[list[str], pd.DataFrame, list[int]]:
-
     extraction_start = time.perf_counter()
 
-    # 1. Inspect original dimensions
-
     original_shape = raw_df.shape
-
     original_memory = raw_df.memory_usage(deep=True).sum()
 
     print(
         f"\nOriginal worksheet dimensions: "
         f"{original_shape[0]} rows x {original_shape[1]} columns"
     )
-
     print(
         f"Original DataFrame memory: "
         f"{original_memory / (1024 * 1024):.2f} MB"
     )
 
-    # 2. Remove completely empty columns first
-
     step_start = time.perf_counter()
-
     raw_df = raw_df.dropna(axis=1, how="all")
-
     empty_column_removal = time.perf_counter() - step_start
 
     print(
         f"After removing empty columns: "
         f"{raw_df.shape[0]} rows x {raw_df.shape[1]} columns"
     )
-
     print(
         f"Initial empty-column removal: "
         f"{empty_column_removal:.4f}s"
     )
 
-    # 3. Replace whitespace-only cells
-
     step_start = time.perf_counter()
-
-    raw_df = raw_df.replace(
-        r"^\s*$",
-        np.nan,
-        regex=True,
-    )
-
+    raw_df = raw_df.replace(r"^\s*$", np.nan, regex=True)
     whitespace_cleaning = time.perf_counter() - step_start
 
-    # 4. Remove columns containing only empty values
-
     step_start = time.perf_counter()
-
     raw_df = raw_df.dropna(axis=1, how="all")
-
     final_column_removal = time.perf_counter() - step_start
 
-    # 5. Find header row
-
     step_start = time.perf_counter()
-
     header_index = None
 
     for index, row in raw_df.iterrows():
-
         if row.notna().sum() >= 2:
             header_index = index
             break
@@ -225,21 +174,14 @@ def extract_sheet_data(
             "Could not identify a valid header row in this worksheet."
         )
 
-    # 6. Extract headers
-
     step_start = time.perf_counter()
 
     headers = make_unique_headers(
         raw_df.loc[header_index].tolist()
     )
 
-    # 7. Extract records below header
-
     data = raw_df.loc[header_index + 1:].copy()
-
     data.columns = headers
-
-    # Preserve original spreadsheet row numbers.
 
     row_numbers = [
         int(index) + 1
@@ -248,12 +190,9 @@ def extract_sheet_data(
 
     data_extraction = time.perf_counter() - step_start
 
-    # 8. Remove completely empty records
-
     step_start = time.perf_counter()
 
     non_empty_mask = data.notna().any(axis=1)
-
     data = data.loc[non_empty_mask].copy()
 
     row_numbers = [
@@ -267,12 +206,9 @@ def extract_sheet_data(
 
     empty_record_removal = time.perf_counter() - step_start
 
-    # 9. Performance report
-
     total_duration = time.perf_counter() - extraction_start
 
     print("\n---------- EXTRACTION PERFORMANCE ----------")
-
     print(f"Initial empty-column removal: {empty_column_removal:.4f}s")
     print(f"Whitespace cleaning: {whitespace_cleaning:.4f}s")
     print(f"Final empty-column removal: {final_column_removal:.4f}s")
@@ -280,26 +216,17 @@ def extract_sheet_data(
     print(f"Data extraction: {data_extraction:.4f}s")
     print(f"Empty record removal: {empty_record_removal:.4f}s")
     print(f"Total extraction: {total_duration:.4f}s")
-
     print("---------------------------------------------\n")
 
     return headers, data, row_numbers
 
 
-# --------------------------------------------------
-# WORKBOOK READING
-# --------------------------------------------------
-
 def iter_uploaded_sheets(
     file_path: Path,
 ) -> Iterator[tuple[str, pd.DataFrame]]:
-
     extension = file_path.suffix.lower()
 
-    # CSV
-
     if extension == ".csv":
-
         try:
             df = pd.read_csv(
                 file_path,
@@ -308,9 +235,7 @@ def iter_uploaded_sheets(
                 engine="python",
                 encoding="utf-8-sig",
             )
-
         except UnicodeDecodeError:
-
             df = pd.read_csv(
                 file_path,
                 dtype=object,
@@ -320,20 +245,12 @@ def iter_uploaded_sheets(
             )
 
         yield file_path.stem, df
-
         return
-
-    # Excel
 
     engine = "xlrd" if extension == ".xls" else "openpyxl"
 
-    with pd.ExcelFile(
-        file_path,
-        engine=engine,
-    ) as excel_file:
-
+    with pd.ExcelFile(file_path, engine=engine) as excel_file:
         for sheet_name in excel_file.sheet_names:
-
             read_start = time.perf_counter()
 
             df = excel_file.parse(
@@ -350,27 +267,16 @@ def iter_uploaded_sheets(
             )
 
             yield sheet_name, df
-
             del df
 
 
-# --------------------------------------------------
-# FILE STORAGE
-# --------------------------------------------------
-
 def save_uploaded_file(uploaded_file) -> Path:
-
-    UPLOAD_DIR.mkdir(
-        parents=True,
-        exist_ok=True,
-    )
+    UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
     extension = Path(uploaded_file.filename).suffix.lower()
-
     file_path = UPLOAD_DIR / f"{uuid4()}{extension}"
 
     with file_path.open("wb") as destination:
-
         while chunk := uploaded_file.file.read(1024 * 1024):
             destination.write(chunk)
 
@@ -379,18 +285,14 @@ def save_uploaded_file(uploaded_file) -> Path:
     return file_path
 
 
-# --------------------------------------------------
-# DATASET INGESTION
-# --------------------------------------------------
-
 def ingest_dataset(
     db: Session,
     uploaded_file,
     dataset_name: str | None = None,
+    user_id: int | None = None,
+    department_id: int | None = None,
 ) -> dict:
-
     ingestion_start = time.perf_counter()
-
     uploaded_path = None
 
     total_rows = 0
@@ -401,16 +303,12 @@ def ingest_dataset(
     total_insert_duration = 0.0
 
     try:
-
-        # 1. Save uploaded file
-
         uploaded_path = save_uploaded_file(uploaded_file)
-
         file_size = uploaded_path.stat().st_size
 
-        # 2. Create dataset
-
         dataset = Dataset(
+            user_id=user_id,
+            department_id=department_id,
             name=dataset_name or uploaded_file.filename,
             original_filename=uploaded_file.filename,
             file_type=uploaded_path.suffix.lower().replace(".", ""),
@@ -420,24 +318,15 @@ def ingest_dataset(
         )
 
         db.add(dataset)
-
-        # Make generated dataset ID available.
-
         db.flush()
-
-        # 3. Process worksheets
 
         for sheet_index, (sheet_name, raw_df) in enumerate(
             iter_uploaded_sheets(uploaded_path)
         ):
-
             sheet_start = time.perf_counter()
 
             print(f"\nProcessing worksheet: {sheet_name}")
-
             total_sheets += 1
-
-            # Extract worksheet data
 
             extraction_start = time.perf_counter()
 
@@ -446,12 +335,9 @@ def ingest_dataset(
             extraction_duration = (
                 time.perf_counter() - extraction_start
             )
-
             total_extraction_duration += extraction_duration
 
             del raw_df
-
-            # 4. Create worksheet using actual model fields
 
             sheet = DatasetSheet(
                 dataset_id=dataset.id,
@@ -462,17 +348,12 @@ def ingest_dataset(
             )
 
             db.add(sheet)
-
             db.flush()
-
-            # 5. Create column metadata using actual model fields
 
             column_objects = []
 
             for column_index, column_name in enumerate(headers):
-
                 series = data[column_name]
-
                 non_null_values = series.dropna()
 
                 column_objects.append(
@@ -491,20 +372,13 @@ def ingest_dataset(
 
             db.add_all(column_objects)
 
-            # 6. Insert records in batches
-
             insert_start = time.perf_counter()
-
             batch_records = []
 
             for row_index, values in zip(
                 row_numbers,
-                data.itertuples(
-                    index=False,
-                    name=None,
-                ),
+                data.itertuples(index=False, name=None),
             ):
-
                 record_data = {
                     column: to_json_value(value)
                     for column, value in zip(headers, values)
@@ -519,28 +393,20 @@ def ingest_dataset(
                 )
 
                 if len(batch_records) >= BATCH_SIZE:
-
                     db.execute(
                         insert(DatasetRecord),
                         batch_records,
                     )
-
                     batch_records.clear()
 
-            # Insert remaining records
-
             if batch_records:
-
                 db.execute(
                     insert(DatasetRecord),
                     batch_records,
                 )
 
             insert_duration = time.perf_counter() - insert_start
-
             total_insert_duration += insert_duration
-
-            # 7. Update totals
 
             sheet_rows = len(data)
             sheet_columns = len(headers)
@@ -551,59 +417,34 @@ def ingest_dataset(
             sheet_duration = time.perf_counter() - sheet_start
 
             print(f"Worksheet completed: {sheet_name}")
-
-            print(
-                f"Rows: {sheet_rows} | "
-                f"Columns: {sheet_columns}"
-            )
-
+            print(f"Rows: {sheet_rows} | Columns: {sheet_columns}")
             print(
                 f"Extraction: {extraction_duration:.4f}s | "
                 f"Insertion: {insert_duration:.4f}s"
             )
-
-            print(
-                f"Worksheet total: {sheet_duration:.4f}s"
-            )
+            print(f"Worksheet total: {sheet_duration:.4f}s")
 
             del data
             del row_numbers
             del headers
             del column_objects
 
-        # 8. Update dataset summary
-
         dataset.row_count = total_rows
         dataset.column_count = total_columns
         dataset.status = "completed"
 
         db.commit()
-
-        # 9. Performance summary
+        db.refresh(dataset)
 
         total_duration = time.perf_counter() - ingestion_start
 
         print("\n========== INGESTION SUMMARY ==========")
-
         print(f"Worksheets: {total_sheets}")
         print(f"Total rows: {total_rows}")
         print(f"Total columns: {total_columns}")
-
-        print(
-            f"Total extraction: "
-            f"{total_extraction_duration:.4f}s"
-        )
-
-        print(
-            f"Total insertion: "
-            f"{total_insert_duration:.4f}s"
-        )
-
-        print(
-            f"Total ingestion: "
-            f"{total_duration:.4f}s"
-        )
-
+        print(f"Total extraction: {total_extraction_duration:.4f}s")
+        print(f"Total insertion: {total_insert_duration:.4f}s")
+        print(f"Total ingestion: {total_duration:.4f}s")
         print("=======================================\n")
 
         return {
@@ -611,13 +452,14 @@ def ingest_dataset(
             "name": dataset.name,
             "filename": dataset.original_filename,
             "status": dataset.status,
+            "department_id": dataset.department_id,
+            "user_id": dataset.user_id,
             "sheet_count": total_sheets,
             "row_count": total_rows,
             "column_count": total_columns,
         }
 
     except Exception:
-
         db.rollback()
 
         if uploaded_path and uploaded_path.exists():

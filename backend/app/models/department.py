@@ -10,7 +10,10 @@ from app.database import Base
 class Department(Base):
     __tablename__ = "departments"
 
-    id: Mapped[int] = mapped_column(primary_key=True, index=True)
+    id: Mapped[int] = mapped_column(
+        primary_key=True,
+        index=True,
+    )
 
     name: Mapped[str] = mapped_column(
         String(100),
@@ -30,5 +33,9 @@ class Department(Base):
     )
 
     datasets: Mapped[list["Dataset"]] = relationship(
+        back_populates="department",
+    )
+
+    projects: Mapped[list["Project"]] = relationship(
         back_populates="department",
     )

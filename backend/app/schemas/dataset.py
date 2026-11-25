@@ -5,26 +5,14 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field
 
 
-# --------------------------------------------------
-# BASE CONFIGURATION
-# --------------------------------------------------
-
 class ORMBaseSchema(BaseModel):
-    """
-    Allows Pydantic to read data directly
-    from SQLAlchemy model objects.
-    """
-
     model_config = ConfigDict(from_attributes=True)
 
-
-# --------------------------------------------------
-# DATASET SCHEMAS
-# --------------------------------------------------
 
 class DatasetResponse(ORMBaseSchema):
     id: int
     user_id: int | None = None
+    department_id: int | None = None
 
     name: str
     original_filename: str
@@ -45,9 +33,9 @@ class DatasetDetailResponse(DatasetResponse):
     pass
 
 
-# --------------------------------------------------
-# DATASET SHEET SCHEMAS
-# --------------------------------------------------
+class DatasetUpdateRequest(BaseModel):
+    name: str = Field(min_length=2, max_length=255)
+
 
 class DatasetSheetResponse(ORMBaseSchema):
     id: int
@@ -64,10 +52,6 @@ class DatasetSheetResponse(ORMBaseSchema):
     created_at: datetime
 
 
-# --------------------------------------------------
-# DATASET COLUMN SCHEMAS
-# --------------------------------------------------
-
 class DatasetColumnResponse(ORMBaseSchema):
     id: int
     sheet_id: int
@@ -80,10 +64,6 @@ class DatasetColumnResponse(ORMBaseSchema):
     null_count: int
 
 
-# --------------------------------------------------
-# DATASET RECORD SCHEMAS
-# --------------------------------------------------
-
 class DatasetRecordResponse(ORMBaseSchema):
     id: int
     sheet_id: int
@@ -95,10 +75,6 @@ class DatasetRecordResponse(ORMBaseSchema):
     updated_at: datetime
 
 
-# --------------------------------------------------
-# PAGINATION SCHEMAS
-# --------------------------------------------------
-
 class PaginationMetadata(BaseModel):
     total_records: int
     page: int
@@ -109,7 +85,6 @@ class PaginationMetadata(BaseModel):
 class DatasetRecordListResponse(BaseModel):
     data: list[DatasetRecordResponse]
     pagination: PaginationMetadata
-
 
 
 class DatasetListResponse(BaseModel):
