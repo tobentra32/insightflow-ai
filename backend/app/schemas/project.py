@@ -1,8 +1,14 @@
+
 from datetime import datetime
+from typing import Any, Literal
 
-from typing import Literal
-
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    field_validator,
+    model_validator,
+)
 
 
 ProjectStatus = Literal["active", "on_hold", "completed", "archived"]
@@ -45,9 +51,12 @@ class ProjectUpdateRequest(BaseModel):
     def validate_required_text(cls, value: str | None) -> str | None:
         if value is None:
             return value
+
         value = value.strip()
+
         if not value:
             raise ValueError("This field cannot be empty.")
+
         return value
 
     @field_validator("contract_reference", "description")
@@ -55,6 +64,7 @@ class ProjectUpdateRequest(BaseModel):
     def clean_optional_text(cls, value: str | None) -> str | None:
         if value is None:
             return None
+
         value = value.strip()
         return value or None
 
@@ -63,7 +73,12 @@ class ProjectUpdateRequest(BaseModel):
         if not self.model_fields_set:
             raise ValueError("At least one field must be provided.")
 
-        for field in ("customer_name", "destination", "status", "department_id"):
+        for field in (
+            "customer_name",
+            "destination",
+            "status",
+            "department_id",
+        ):
             if field in self.model_fields_set and getattr(self, field) is None:
                 raise ValueError(f"{field} cannot be null.")
 
@@ -88,3 +103,23 @@ class ProjectResponse(BaseModel):
 class ProjectListResponse(BaseModel):
     items: list[ProjectResponse]
     total: int
+
+
+class ProjectAuditLogResponse(BaseModel):
+    id: int
+    user_id: int | None
+    changed_by_name: str | None
+    action: str | None
+    entity_type: str
+    entity_id: int
+    field_name: str
+    old_value: Any | None
+    new_value: Any | None
+    changed_at: datetime
+
+
+class ProjectAuditLogListResponse(BaseModel):
+    items: list[ProjectAuditLogResponse]
+    total: int
+    skip: int
+    limit: int

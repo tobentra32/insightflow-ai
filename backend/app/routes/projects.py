@@ -1,13 +1,17 @@
+
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from app.core.dependencies import get_current_user
 from app.database import get_db
+from app.models.audit_log import AuditLog
 from app.models.department import Department
 from app.models.project import Project
 from app.models.user import User
 from app.schemas.project import (
+    ProjectAuditLogListResponse,
+    ProjectAuditLogResponse,
     ProjectCreateRequest,
     ProjectListResponse,
     ProjectResponse,
@@ -146,8 +150,6 @@ def create_project(
     )
 
     db.add(project)
-
-    # Obtain the generated project ID without committing yet.
     db.flush()
 
     initial_values = {
@@ -263,6 +265,65 @@ def get_project(
     current_user: User = Depends(get_current_user),
 ):
     return get_accessible_project(db, project_id, current_user)
+
+
+@router.get(
+    "/{project_id}/audit-logs",
+    response_model=ProjectAuditLogListResponse,
+)
+def get_project_audit_logs(
+    project_id: int,
+    skip: int = Query(default=0, ge=0),
+    limit: int = Query(default=50, ge=1, le=100),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    # Reuse project access control before retrieving any audit records.
+    get_accessible_project(db, project_id, current_user)
+
+    conditions = (
+        AuditLog.entity_type == "project",
+        AuditLog.entity_id == project_id,
+    )
+
+    total = db.scalar(
+        select(func.count(AuditLog.id)).where(*conditions)
+    ) or 0
+
+    rows = db.execute(
+        select(AuditLog, User.name)
+        .outerjoin(User, AuditLog.user_id == User.id)
+        .where(*conditions)
+        .order_by(
+            AuditLog.changed_at.desc(),
+            AuditLog.id.desc(),
+        )
+        .offset(skip)
+        .limit(limit)
+    ).all()
+
+    items = [
+        ProjectAuditLogResponse(
+            id=log.id,
+            user_id=log.user_id,
+            changed_by_name=user_name,
+            action=log.action,
+            entity_type=log.entity_type,
+            entity_id=log.entity_id,
+            field_name=log.field_name,
+            old_value=log.old_value,
+            new_value=log.new_value,
+            changed_at=log.changed_at,
+        )
+        for log, user_name in rows
+    ]
+
+    return ProjectAuditLogListResponse(
+        items=items,
+        total=total,
+        skip=skip,
+        limit=limit,
+    )
 
 
 @router.patch("/{project_id}", response_model=ProjectResponse)

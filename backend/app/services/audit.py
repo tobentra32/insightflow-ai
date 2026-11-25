@@ -16,7 +16,12 @@ def record_audit_changes(
     changes: dict[str, tuple[Any | None, Any | None]],
 ) -> None:
     """
-    Add one audit-log row for each supplied field change.
+    Add one audit-log row for each supplied field.
+
+    Creation events retain all supplied fields, including fields
+    whose initial value is None.
+
+    Update events skip fields whose values have not changed.
 
     Does not commit. The calling operation controls the transaction.
     """
@@ -34,7 +39,9 @@ def record_audit_changes(
         if not field_name or len(field_name) > 255:
             raise ValueError("Invalid audit field name.")
 
-        if old_value == new_value:
+        # Creation records the complete initial state, including None.
+        # Other actions only record actual changes.
+        if action != "created" and old_value == new_value:
             continue
 
         db.add(
