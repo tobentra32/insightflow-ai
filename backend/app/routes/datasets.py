@@ -12,6 +12,7 @@ from fastapi import (
     UploadFile,
     status,
 )
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.core.dependencies import get_current_user
@@ -21,13 +22,17 @@ from app.core.permissions import (
 )
 from app.database import get_db
 from app.models import Dataset, DatasetSheet, User
+from app.models.audit_log import AuditLog
 from app.models.department import Department
 from app.schemas.dataset import (
+    DatasetAuditLogListResponse,
+    DatasetAuditLogResponse,
     DatasetListResponse,
     DatasetDetailResponse,
     DatasetSheetResponse,
     DatasetUpdateRequest,
 )
+from app.services.audit import record_audit_changes
 from app.services.ingestion_service import ingest_dataset
 
 
@@ -44,6 +49,21 @@ UPLOAD_DIR = (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _department_value_matches(
+    value: object,
+    department_id: int,
+) -> bool:
+    """Compare a stored audit value with a department ID safely."""
+
+    if value is None:
+        return False
+
+    try:
+        return int(str(value)) == department_id
+    except (TypeError, ValueError):
+        return False
 
 
 @router.post("/upload", status_code=status.HTTP_201_CREATED)
@@ -76,7 +96,10 @@ def upload_dataset(
         if current_user.department_id is None:
             raise HTTPException(
                 status_code=403,
-                detail="Your account must be assigned to a department before uploading datasets.",
+                detail=(
+                    "Your account must be assigned to a department "
+                    "before uploading datasets."
+                ),
             )
 
         if (
@@ -85,7 +108,9 @@ def upload_dataset(
         ):
             raise HTTPException(
                 status_code=403,
-                detail="You can only upload datasets into your own department.",
+                detail=(
+                    "You can only upload datasets into your own department."
+                ),
             )
 
         target_department_id = current_user.department_id
@@ -234,6 +259,150 @@ def get_dataset(
 
 
 @router.get(
+    "/{dataset_id}/audit-logs",
+    response_model=DatasetAuditLogListResponse,
+)
+def get_dataset_audit_logs(
+    dataset_id: int,
+    skip: int = Query(default=0, ge=0),
+    limit: int = Query(default=50, ge=1, le=100),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Retrieve dataset audit history.
+
+    Existing datasets use the normal dataset access rules.
+    Deleted datasets use their final department recorded in audit history.
+    """
+
+    dataset = db.get(Dataset, dataset_id)
+
+    if dataset is not None:
+        # Enforces the normal department visibility rules, including
+        # admin-only access to legacy datasets with no department.
+        get_accessible_dataset(
+            db=db,
+            dataset_id=dataset_id,
+            current_user=current_user,
+        )
+
+    audit_conditions = (
+        AuditLog.entity_type == "dataset",
+        AuditLog.entity_id == dataset_id,
+    )
+
+    if dataset is None:
+        # A deleted dataset no longer has a database row. Its latest
+        # department audit entry tells us which department owned it
+        # immediately before deletion.
+        latest_department_entry = db.scalar(
+            select(AuditLog)
+            .where(
+                *audit_conditions,
+                AuditLog.field_name == "department_id",
+            )
+            .order_by(
+                AuditLog.changed_at.desc(),
+                AuditLog.id.desc(),
+            )
+            .limit(1)
+        )
+
+        if latest_department_entry is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Dataset audit history not found.",
+            )
+
+        if current_user.role == "admin":
+            pass
+
+        elif current_user.role == "employee":
+            if current_user.department_id is None:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Dataset audit history not found.",
+                )
+
+            # A deletion event stores the department being deleted from
+            # in old_value. Other events store the current department
+            # in new_value.
+            if latest_department_entry.action == "deleted":
+                final_department_value = latest_department_entry.old_value
+            else:
+                final_department_value = latest_department_entry.new_value
+
+            belongs_to_department = _department_value_matches(
+                final_department_value,
+                current_user.department_id,
+            )
+
+            if not belongs_to_department:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Dataset audit history not found.",
+                )
+
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=(
+                    "Your account does not have permission "
+                    "to view dataset audit history."
+                ),
+            )
+
+    elif current_user.role not in {"admin", "employee"}:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=(
+                "Your account does not have permission "
+                "to view dataset audit history."
+            ),
+        )
+
+    total = db.scalar(
+        select(func.count(AuditLog.id)).where(*audit_conditions)
+    ) or 0
+
+    rows = db.execute(
+        select(AuditLog, User.name)
+        .outerjoin(User, AuditLog.user_id == User.id)
+        .where(*audit_conditions)
+        .order_by(
+            AuditLog.changed_at.desc(),
+            AuditLog.id.desc(),
+        )
+        .offset(skip)
+        .limit(limit)
+    ).all()
+
+    items = [
+        DatasetAuditLogResponse(
+            id=log.id,
+            user_id=log.user_id,
+            changed_by_name=user_name,
+            action=log.action,
+            entity_type=log.entity_type,
+            entity_id=log.entity_id,
+            field_name=log.field_name,
+            old_value=log.old_value,
+            new_value=log.new_value,
+            changed_at=log.changed_at,
+        )
+        for log, user_name in rows
+    ]
+
+    return DatasetAuditLogListResponse(
+        items=items,
+        total=total,
+        skip=skip,
+        limit=limit,
+    )
+
+
+@router.get(
     "/{dataset_id}/sheets",
     response_model=list[DatasetSheetResponse],
 )
@@ -274,12 +443,27 @@ def update_dataset(
 
     require_dataset_editor(dataset, current_user)
 
-    dataset.name = payload.name.strip()
+    old_name = dataset.name
+    new_name = payload.name.strip()
 
-    if len(dataset.name) < 2:
+    if len(new_name) < 2:
         raise HTTPException(
             status_code=400,
             detail="Dataset name must contain at least 2 characters.",
+        )
+
+    dataset.name = new_name
+
+    if old_name != new_name:
+        record_audit_changes(
+            db,
+            user_id=current_user.id,
+            entity_type="dataset",
+            entity_id=dataset.id,
+            action="updated",
+            changes={
+                "name": (old_name, new_name),
+            },
         )
 
     db.commit()
@@ -303,6 +487,28 @@ def delete_dataset(
     require_dataset_editor(dataset, current_user)
 
     storage_path = dataset.storage_path
+
+    # Preserve the dataset's final metadata in the generic audit log.
+    # Do not use the dataset_id foreign-key field for this event:
+    # generic entity references allow the history to survive deletion.
+    record_audit_changes(
+        db,
+        user_id=current_user.id,
+        entity_type="dataset",
+        entity_id=dataset.id,
+        action="deleted",
+        changes={
+            "name": (dataset.name, None),
+            "owner_user_id": (dataset.user_id, None),
+            "department_id": (dataset.department_id, None),
+            "original_filename": (dataset.original_filename, None),
+            "file_type": (dataset.file_type, None),
+            "file_size": (dataset.file_size, None),
+            "row_count": (dataset.row_count, None),
+            "column_count": (dataset.column_count, None),
+            "status": (dataset.status, None),
+        },
+    )
 
     db.delete(dataset)
     db.commit()

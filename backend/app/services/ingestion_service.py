@@ -21,6 +21,7 @@ from app.models import (
     DatasetColumn,
     DatasetRecord,
 )
+from app.services.audit import record_audit_changes
 
 
 BACKEND_DIR = Path(__file__).resolve().parents[2]
@@ -234,6 +235,7 @@ def iter_uploaded_sheets(
                 sep=None,
                 engine="python",
                 encoding="utf-8-sig",
+                header=None,
             )
         except UnicodeDecodeError:
             df = pd.read_csv(
@@ -242,6 +244,7 @@ def iter_uploaded_sheets(
                 sep=None,
                 engine="python",
                 encoding="cp1252",
+                header=None,
             )
 
         yield file_path.stem, df
@@ -432,6 +435,29 @@ def ingest_dataset(
         dataset.row_count = total_rows
         dataset.column_count = total_columns
         dataset.status = "completed"
+
+        if user_id is not None:
+            record_audit_changes(
+                db,
+                user_id=user_id,
+                entity_type="dataset",
+                entity_id=dataset.id,
+                action="created",
+                changes={
+                    "name": (None, dataset.name),
+                    "owner_user_id": (None, dataset.user_id),
+                    "department_id": (None, dataset.department_id),
+                    "original_filename": (
+                        None,
+                        dataset.original_filename,
+                    ),
+                    "file_type": (None, dataset.file_type),
+                    "file_size": (None, dataset.file_size),
+                    "row_count": (None, dataset.row_count),
+                    "column_count": (None, dataset.column_count),
+                    "status": (None, dataset.status),
+                },
+            )
 
         db.commit()
         db.refresh(dataset)

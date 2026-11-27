@@ -90,3 +90,23 @@ class DatasetRecordListResponse(BaseModel):
 class DatasetListResponse(BaseModel):
     data: list[DatasetResponse]
     pagination: PaginationMetadata
+
+
+class DatasetAuditLogResponse(BaseModel):
+    id: int
+    user_id: int | None
+    changed_by_name: str | None
+    action: str | None
+    entity_type: str
+    entity_id: int
+    field_name: str
+    old_value: Any | None
+    new_value: Any | None
+    changed_at: datetime
+
+
+class DatasetAuditLogListResponse(BaseModel):
+    items: list[DatasetAuditLogResponse]
+    total: int
+    skip: int
+    limit: int
