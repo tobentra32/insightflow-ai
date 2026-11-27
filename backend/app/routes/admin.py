@@ -11,6 +11,7 @@ from app.core.security import hash_password, validate_password
 from app.database import get_db
 from app.models.department import Department
 from app.models.user import User
+from app.services.audit import record_audit_changes
 from app.schemas.admin import (
     AdminUserCreate,
     AdminUserCreatedResponse,
@@ -151,6 +152,17 @@ def create_department(
     db.add(department)
 
     try:
+        db.flush()
+        record_audit_changes(
+            db,
+            user_id=current_admin.id,
+            entity_type="department",
+            entity_id=department.id,
+            action="created",
+            changes={
+                "name": (None, department.name),
+            },
+        )
         db.commit()
         db.refresh(department)
     except IntegrityError:
@@ -230,6 +242,25 @@ def create_user(
     db.add(user)
 
     try:
+        db.flush()
+        record_audit_changes(
+            db,
+            user_id=current_admin.id,
+            entity_type="user",
+            entity_id=user.id,
+            action="created",
+            changes={
+                "name": (None, user.name),
+                "email": (None, user.email),
+                "role": (None, user.role),
+                "department_id": (None, user.department_id),
+                "is_active": (None, user.is_active),
+                "must_change_password": (
+                    None,
+                    user.must_change_password,
+                ),
+            },
+        )
         db.commit()
         user = get_user_or_404(db, user.id)
     except IntegrityError:
@@ -355,10 +386,22 @@ def update_user(
                 detail="Name must contain at least 2 characters.",
             )
 
+    changes = {}
     for field, value in updates.items():
-        setattr(user, field, value)
+        old_value = getattr(user, field)
+        if old_value != value:
+            changes[field] = (old_value, value)
+            setattr(user, field, value)
 
     try:
+        record_audit_changes(
+            db,
+            user_id=current_admin.id,
+            entity_type="user",
+            entity_id=user.id,
+            action="updated",
+            changes=changes,
+        )
         db.commit()
         user = get_user_or_404(db, user.id)
     except IntegrityError:
@@ -383,9 +426,25 @@ def reset_user_password(
     user = get_user_or_404(db, user_id)
 
     temporary_password = generate_temporary_password()
+    old_must_change_password = user.must_change_password
 
     user.password_hash = hash_password(temporary_password)
     user.must_change_password = True
+
+    record_audit_changes(
+        db,
+        user_id=current_admin.id,
+        entity_type="user",
+        entity_id=user.id,
+        action="password_reset",
+        changes={
+            "password_reset": (None, True),
+            "must_change_password": (
+                old_must_change_password,
+                True,
+            ),
+        },
+    )
 
     db.commit()
 

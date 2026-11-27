@@ -1,4 +1,3 @@
-
 import pytest
 
 from app.models.user import User
@@ -174,3 +173,77 @@ def test_user_can_change_password(client, create_user):
     )
 
     assert login_response.status_code == 200
+
+
+
+def test_temporary_password_user_is_blocked_from_normal_endpoints(
+    client,
+    create_user,
+):
+    create_user(
+        email="temporary@example.com",
+        password="TemporaryPass@2026",
+        role="employee",
+        must_change_password=True,
+    )
+
+    login_response = client.post(
+        "/api/auth/login",
+        json={
+            "email": "temporary@example.com",
+            "password": "TemporaryPass@2026",
+        },
+    )
+
+    assert login_response.status_code == 200
+    assert login_response.json()["user"]["must_change_password"] is True
+
+    # The user may check their own status to determine the required next step.
+    me_response = client.get("/api/auth/me")
+    assert me_response.status_code == 200
+    assert me_response.json()["must_change_password"] is True
+
+    # Normal application endpoints remain unavailable until the password changes.
+    protected_response = client.get("/api/projects")
+    assert protected_response.status_code == 403
+    assert protected_response.json()["detail"] == (
+        "You must change your temporary password before accessing this resource."
+    )
+
+
+def test_temporary_password_user_can_change_password_and_then_access_app(
+    client,
+    create_user,
+):
+    create_user(
+        email="temporary@example.com",
+        password="TemporaryPass@2026",
+        role="employee",
+        must_change_password=True,
+    )
+
+    login_response = client.post(
+        "/api/auth/login",
+        json={
+            "email": "temporary@example.com",
+            "password": "TemporaryPass@2026",
+        },
+    )
+    assert login_response.status_code == 200
+
+    change_response = client.post(
+        "/api/auth/change-password",
+        json={
+            "current_password": "TemporaryPass@2026",
+            "new_password": "NewInsightFlow@2027",
+        },
+    )
+
+    assert change_response.status_code == 200
+
+    me_response = client.get("/api/auth/me")
+    assert me_response.status_code == 200
+    assert me_response.json()["must_change_password"] is False
+
+    protected_response = client.get("/api/projects")
+    assert protected_response.status_code == 200

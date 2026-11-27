@@ -736,3 +736,51 @@ def test_deleted_dataset_without_audit_history_returns_404(
     )
 
     assert response.status_code == 404
+
+
+def test_dataset_audit_history_includes_legacy_dataset_logs(
+    client,
+    db_session,
+):
+    """Older dataset audit rows use dataset_id, not generic entity fields."""
+
+    department = create_department(db_session, "Operations")
+    owner = create_user(
+        db_session,
+        "dataset-legacy-history@example.com",
+        department_id=department.id,
+    )
+    dataset = create_dataset(
+        db_session,
+        owner.id,
+        department.id,
+        "Legacy Dataset",
+    )
+
+    legacy_entry = AuditLog(
+        dataset_id=dataset.id,
+        record_id=None,
+        user_id=owner.id,
+        field_name="name",
+        old_value=None,
+        new_value="Legacy Dataset",
+    )
+    db_session.add(legacy_entry)
+    db_session.commit()
+
+    assert login(client, owner.email).status_code == 200
+
+    response = client.get(
+        f"/api/datasets/{dataset.id}/audit-logs"
+    )
+
+    assert response.status_code == 200
+    result = response.json()
+
+    assert result["total"] == 1
+    assert len(result["items"]) == 1
+    assert result["items"][0]["field_name"] == "name"
+    assert result["items"][0]["changed_by_name"] == owner.name
+    assert result["items"][0]["entity_type"] is None
+    assert result["items"][0]["entity_id"] is None
+    assert result["items"][0]["action"] is None

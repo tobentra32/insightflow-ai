@@ -1,8 +1,10 @@
 
 import pytest
+from sqlalchemy import select
 from fastapi.testclient import TestClient
 
 from app.core.security import hash_password, verify_password
+from app.models.audit_log import AuditLog
 from app.models.department import Department
 from app.models.user import User
 
@@ -67,7 +69,7 @@ def employee_user(db_session, department):
     )
 
 
-def test_admin_can_create_department(client, admin_user):
+def test_admin_can_create_department(client, admin_user, db_session):
     login_response = login(client, admin_user.email)
     assert login_response.status_code == 200
 
@@ -79,11 +81,27 @@ def test_admin_can_create_department(client, admin_user):
     assert response.status_code == 201
     assert response.json()["name"] == "Documentation"
 
+    department_id = response.json()["id"]
+    audit_logs = db_session.scalars(
+        select(AuditLog).where(
+            AuditLog.entity_type == "department",
+            AuditLog.entity_id == department_id,
+        )
+    ).all()
+
+    assert len(audit_logs) == 1
+    assert audit_logs[0].action == "created"
+    assert audit_logs[0].field_name == "name"
+    assert audit_logs[0].old_value is None
+    assert audit_logs[0].new_value == "Documentation"
+    assert audit_logs[0].user_id == admin_user.id
+
 
 def test_admin_can_create_employee(
     client,
     admin_user,
     department,
+    db_session,
 ):
     login_response = login(client, admin_user.email)
     assert login_response.status_code == 200
@@ -107,6 +125,27 @@ def test_admin_can_create_employee(
     assert data["user"]["department_id"] == department.id
     assert data["user"]["must_change_password"] is True
     assert len(data["temporary_password"]) >= 12
+
+    audit_logs = db_session.scalars(
+        select(AuditLog).where(
+            AuditLog.entity_type == "user",
+            AuditLog.entity_id == data["user"]["id"],
+        )
+    ).all()
+
+    assert {log.field_name for log in audit_logs} == {
+        "name",
+        "email",
+        "role",
+        "department_id",
+        "is_active",
+        "must_change_password",
+    }
+    assert all(log.action == "created" for log in audit_logs)
+    assert all(log.user_id == admin_user.id for log in audit_logs)
+    assert data["temporary_password"] not in {
+        str(log.old_value) for log in audit_logs
+    } | {str(log.new_value) for log in audit_logs}
 
 
 def test_admin_cannot_create_employee_without_department(
@@ -229,6 +268,66 @@ def test_admin_can_reset_employee_password(
         data["temporary_password"],
         employee_user.password_hash,
     )
+
+    reset_logs = db_session.scalars(
+        select(AuditLog).where(
+            AuditLog.entity_type == "user",
+            AuditLog.entity_id == employee_user.id,
+            AuditLog.action == "password_reset",
+        )
+    ).all()
+
+    assert len(reset_logs) == 2
+
+    reset_fields = {log.field_name for log in reset_logs}
+
+    assert reset_fields == {
+        "password_reset",
+        "must_change_password",
+    }
+
+    password_reset_log = next(
+        log for log in reset_logs
+        if log.field_name == "password_reset"
+    )
+
+    assert password_reset_log.new_value is True
+
+    assert all(
+        data["temporary_password"] not in str(log.old_value)
+        and data["temporary_password"] not in str(log.new_value)
+        for log in reset_logs
+    )
+
+
+def test_admin_can_audit_user_profile_updates(
+    client,
+    db_session,
+    admin_user,
+    employee_user,
+):
+    login(client, admin_user.email)
+
+    response = client.patch(
+        f"/api/admin/users/{employee_user.id}",
+        json={"name": "Updated Employee Name"},
+    )
+
+    assert response.status_code == 200
+
+    name_logs = db_session.scalars(
+        select(AuditLog).where(
+            AuditLog.entity_type == "user",
+            AuditLog.entity_id == employee_user.id,
+            AuditLog.field_name == "name",
+        )
+    ).all()
+
+    assert len(name_logs) == 1
+    assert name_logs[0].action == "updated"
+    assert name_logs[0].old_value == "Test User"
+    assert name_logs[0].new_value == "Updated Employee Name"
+    assert name_logs[0].user_id == admin_user.id
 
 
 def test_unauthenticated_user_cannot_access_admin_endpoints(client):

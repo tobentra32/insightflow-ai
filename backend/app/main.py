@@ -3,6 +3,7 @@ import os
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from sqlalchemy import text
@@ -29,6 +30,35 @@ FRONTEND_ORIGINS = [
     ).split(",")
     if origin.strip()
 ]
+
+
+@app.exception_handler(RequestValidationError)
+async def request_validation_exception_handler(
+    request: Request,
+    exc: RequestValidationError,
+):
+    """
+    Return safe validation errors without echoing rejected input.
+
+    Pydantic validation errors can contain non-finite values such as NaN
+    in their input/context fields. Those values cannot be serialized as
+    strict JSON, so only expose the location, message, and error type.
+    """
+    safe_errors = []
+
+    for error in exc.errors():
+        safe_errors.append(
+            {
+                "loc": list(error.get("loc", ())),
+                "msg": str(error.get("msg", "Invalid request.")),
+                "type": str(error.get("type", "value_error")),
+            }
+        )
+
+    return JSONResponse(
+        status_code=422,
+        content={"detail": safe_errors},
+    )
 
 
 app.add_middleware(

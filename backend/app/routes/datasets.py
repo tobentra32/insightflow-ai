@@ -12,7 +12,7 @@ from fastapi import (
     UploadFile,
     status,
 )
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.dependencies import get_current_user
@@ -26,13 +26,13 @@ from app.models.audit_log import AuditLog
 from app.models.department import Department
 from app.schemas.dataset import (
     DatasetAuditLogListResponse,
-    DatasetAuditLogResponse,
     DatasetListResponse,
     DatasetDetailResponse,
     DatasetSheetResponse,
     DatasetUpdateRequest,
 )
 from app.services.audit import record_audit_changes
+from app.services.audit_history import get_audit_history
 from app.services.ingestion_service import ingest_dataset
 
 
@@ -362,41 +362,24 @@ def get_dataset_audit_logs(
             ),
         )
 
-    total = db.scalar(
-        select(func.count(AuditLog.id)).where(*audit_conditions)
-    ) or 0
-
-    rows = db.execute(
-        select(AuditLog, User.name)
-        .outerjoin(User, AuditLog.user_id == User.id)
-        .where(*audit_conditions)
-        .order_by(
-            AuditLog.changed_at.desc(),
-            AuditLog.id.desc(),
-        )
-        .offset(skip)
-        .limit(limit)
-    ).all()
-
-    items = [
-        DatasetAuditLogResponse(
-            id=log.id,
-            user_id=log.user_id,
-            changed_by_name=user_name,
-            action=log.action,
-            entity_type=log.entity_type,
-            entity_id=log.entity_id,
-            field_name=log.field_name,
-            old_value=log.old_value,
-            new_value=log.new_value,
-            changed_at=log.changed_at,
-        )
-        for log, user_name in rows
-    ]
+    history = get_audit_history(
+        db,
+        entity_type="dataset",
+        entity_id=dataset_id,
+        skip=skip,
+        limit=limit,
+        # Before generic entity fields were introduced, dataset-level audit
+        # entries were associated through dataset_id. Exclude record-level
+        # entries so they are not mixed into the dataset's own history.
+        legacy_conditions=(
+            AuditLog.dataset_id == dataset_id,
+            AuditLog.record_id.is_(None),
+        ),
+    )
 
     return DatasetAuditLogListResponse(
-        items=items,
-        total=total,
+        items=history.items,
+        total=history.total,
         skip=skip,
         limit=limit,
     )

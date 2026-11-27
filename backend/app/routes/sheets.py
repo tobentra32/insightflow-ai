@@ -14,15 +14,24 @@ from sqlalchemy import Numeric, and_, case, cast, func
 from sqlalchemy.orm import Session
 
 from app.core.dependencies import get_current_user
-from app.core.permissions import get_accessible_sheet
+from app.core.permissions import (
+    get_accessible_sheet,
+    require_dataset_editor,
+)
 from app.database import get_db
 from app.models.dataset_column import DatasetColumn
 from app.models.record import DatasetRecord
 from app.models.user import User
 from app.schemas.dataset import (
     DatasetColumnResponse,
+    DatasetRecordAuditLogListResponse,
+    DatasetRecordAuditLogResponse,
     DatasetRecordListResponse,
+    DatasetRecordResponse,
+    DatasetRecordUpdateRequest,
 )
+from app.services.audit import record_audit_changes
+from app.services.audit_history import get_audit_history
 
 
 router = APIRouter(
@@ -305,6 +314,33 @@ def apply_record_filters(
     return query
 
 
+def refresh_column_metadata(
+    db: Session,
+    *,
+    sheet_id: int,
+    column: DatasetColumn,
+) -> None:
+    """Recalculate null and uniqueness metadata after a cell is edited."""
+
+    value_expression = DatasetRecord.data[column.column_name].astext
+
+    total_count, non_null_count, distinct_count = (
+        db.query(
+            func.count(DatasetRecord.id),
+            func.count(value_expression),
+            func.count(func.distinct(value_expression)),
+        )
+        .filter(DatasetRecord.sheet_id == sheet_id)
+        .one()
+    )
+
+    column.null_count = total_count - non_null_count
+    column.is_unique = (
+        non_null_count > 0
+        and distinct_count == non_null_count
+    )
+
+
 def apply_record_sorting(
     query,
     sort_column: DatasetColumn | None,
@@ -486,3 +522,181 @@ def get_sheet_records(
             "total_pages": total_pages,
         },
     }
+
+
+@router.patch(
+    "/{sheet_id}/records/{record_id}",
+    response_model=DatasetRecordResponse,
+)
+def update_sheet_record(
+    sheet_id: int,
+    record_id: int,
+    payload: DatasetRecordUpdateRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Update selected cells in one record and audit every changed value.
+
+    Employees may edit only datasets they originally uploaded. Administrators
+    may edit datasets across departments. Other worksheet columns and record
+    metadata are not accepted from the request.
+    """
+
+    sheet, dataset = get_accessible_sheet(
+        db=db,
+        sheet_id=sheet_id,
+        current_user=current_user,
+    )
+
+    require_dataset_editor(dataset, current_user)
+
+    record = (
+        db.query(DatasetRecord)
+        .filter(
+            DatasetRecord.id == record_id,
+            DatasetRecord.sheet_id == sheet.id,
+        )
+        .with_for_update()
+        .first()
+    )
+
+    if record is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Record not found in this worksheet.",
+        )
+
+    columns = (
+        db.query(DatasetColumn)
+        .filter(DatasetColumn.sheet_id == sheet.id)
+        .all()
+    )
+    available_columns = {
+        column.column_name: column
+        for column in columns
+    }
+
+    requested_column_names = set(payload.changes)
+    invalid_columns = requested_column_names - set(available_columns)
+
+    if invalid_columns:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={
+                "message": "One or more columns do not exist in this worksheet.",
+                "invalid_columns": sorted(invalid_columns),
+            },
+        )
+
+    updated_data = dict(record.data)
+    audit_changes = {}
+
+    for column_name, new_value in payload.changes.items():
+        old_value = updated_data.get(column_name)
+
+        if old_value == new_value:
+            continue
+
+        audit_changes[column_name] = (old_value, new_value)
+        updated_data[column_name] = new_value
+
+    if audit_changes:
+        record.data = updated_data
+
+        # Persist the edited JSONB value within the current transaction before
+        # calculating metadata, so the aggregate query includes this edit.
+        db.flush()
+
+        # Lock affected column metadata in a consistent order. This prevents
+        # concurrent edits to different records from overwriting each other's
+        # null-count or uniqueness calculations with stale results.
+        locked_columns = (
+            db.query(DatasetColumn)
+            .filter(
+                DatasetColumn.sheet_id == sheet.id,
+                DatasetColumn.column_name.in_(audit_changes.keys()),
+            )
+            .order_by(DatasetColumn.id.asc())
+            .with_for_update()
+            .all()
+        )
+        locked_columns_by_name = {
+            column.column_name: column
+            for column in locked_columns
+        }
+
+        for column_name in sorted(audit_changes):
+            refresh_column_metadata(
+                db,
+                sheet_id=sheet.id,
+                column=locked_columns_by_name[column_name],
+            )
+
+        record_audit_changes(
+            db,
+            user_id=current_user.id,
+            entity_type="dataset_record",
+            entity_id=record.id,
+            action="updated",
+            record_id=record.id,
+            changes=audit_changes,
+        )
+
+        db.commit()
+        db.refresh(record)
+
+    return record
+
+
+@router.get(
+    "/{sheet_id}/records/{record_id}/audit-logs",
+    response_model=DatasetRecordAuditLogListResponse,
+)
+def get_sheet_record_audit_logs(
+    sheet_id: int,
+    record_id: int,
+    skip: int = Query(default=0, ge=0),
+    limit: int = Query(default=50, ge=1, le=100),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Retrieve the change history for one record in an accessible sheet."""
+
+    sheet, _ = get_accessible_sheet(
+        db=db,
+        sheet_id=sheet_id,
+        current_user=current_user,
+    )
+
+    record = (
+        db.query(DatasetRecord)
+        .filter(
+            DatasetRecord.id == record_id,
+            DatasetRecord.sheet_id == sheet.id,
+        )
+        .first()
+    )
+
+    if record is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Record not found in this worksheet.",
+        )
+
+    history = get_audit_history(
+        db,
+        entity_type="dataset_record",
+        entity_id=record.id,
+        skip=skip,
+        limit=limit,
+    )
+
+    return DatasetRecordAuditLogListResponse(
+        items=[
+            DatasetRecordAuditLogResponse(**item)
+            for item in history.items
+        ],
+        total=history.total,
+        skip=skip,
+        limit=limit,
+    )

@@ -110,8 +110,8 @@ class ProjectAuditLogResponse(BaseModel):
     user_id: int | None
     changed_by_name: str | None
     action: str | None
-    entity_type: str
-    entity_id: int
+    entity_type: str | None
+    entity_id: int | None
     field_name: str
     old_value: Any | None
     new_value: Any | None

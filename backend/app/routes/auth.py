@@ -1,4 +1,3 @@
-
 from fastapi import APIRouter, Depends, HTTPException, Response, status
 from sqlalchemy.orm import Session
 
@@ -10,7 +9,7 @@ from app.schemas.auth import (
     LoginRequest,
     LoginResponse,
 )
-from app.core.dependencies import get_current_user
+from app.core.dependencies import get_authenticated_user
 from app.core.security import (
     COOKIE_SECURE,
     create_access_token,
@@ -94,7 +93,7 @@ def logout(response: Response):
 
 @router.get("/me", response_model=AuthUserResponse)
 def get_me(
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_authenticated_user),
 ):
     return current_user
 
@@ -103,7 +102,7 @@ def get_me(
 def change_password(
     payload: ChangePasswordRequest,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_authenticated_user),
 ):
 
     if not verify_password(

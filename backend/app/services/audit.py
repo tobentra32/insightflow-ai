@@ -13,6 +13,7 @@ def record_audit_changes(
     entity_type: str,
     entity_id: int,
     action: str,
+    record_id: int | None = None,
     changes: dict[str, tuple[Any | None, Any | None]],
 ) -> None:
     """
@@ -22,6 +23,10 @@ def record_audit_changes(
     whose initial value is None.
 
     Update events skip fields whose values have not changed.
+
+    ``record_id`` optionally populates the existing record foreign key
+    alongside the generic entity identity, keeping DatasetRecord.audit_logs
+    relationships usable for record-level audit entries.
 
     Does not commit. The calling operation controls the transaction.
     """
@@ -34,6 +39,9 @@ def record_audit_changes(
 
     if entity_id <= 0:
         raise ValueError("Invalid audit entity ID.")
+
+    if record_id is not None and record_id <= 0:
+        raise ValueError("Invalid audit record ID.")
 
     for field_name, (old_value, new_value) in changes.items():
         if not field_name or len(field_name) > 255:
@@ -50,6 +58,7 @@ def record_audit_changes(
                 entity_type=entity_type,
                 entity_id=entity_id,
                 action=action,
+                record_id=record_id,
                 field_name=field_name,
                 old_value=old_value,
                 new_value=new_value,
